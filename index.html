@@ -23,6 +23,12 @@ h1{font-size:1.5rem;margin:.2rem 0 .1rem}h1 a{color:inherit;text-decoration:none
 .tag{color:var(--mut);font-size:.85rem;margin:0 0 1rem}
 .bar{display:flex;flex-wrap:wrap;gap:.5rem;margin:.8rem 0 1.2rem}
 input[type=search],select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem;font:inherit}
+.combo{position:relative}
+.combo-list{position:absolute;z-index:20;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--line);border-radius:8px;list-style:none;margin:.25rem 0 0;padding:0;max-height:260px;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.15)}
+.combo-list li{padding:.45rem .7rem;cursor:pointer;display:flex;justify-content:space-between;gap:.75rem;font-size:.9rem}
+.combo-list li:hover,.combo-list li.sel{background:var(--line)}
+.combo-list .cnt{opacity:.55;font-variant-numeric:tabular-nums}
+.combo-list li.head{opacity:.55;cursor:default;font-size:.8rem}
 input[type=search]{flex:1;min-width:180px}
 label.chk{display:flex;align-items:center;gap:.4rem;font-size:.9rem;color:var(--mut)}
 button.clear{background:none;border:1px solid var(--line);color:var(--mut);border-radius:8px;padding:.45rem .7rem;cursor:pointer;font:inherit}
@@ -53,8 +59,8 @@ noscript{display:block;padding:1rem;color:var(--mut)}
 
 <div class="bar">
   <input id="q" type="search" placeholder="Search hackathons, organizers…" aria-label="Search">
-  <select id="loc" aria-label="Location"><option value="">Any location</option></select>
-  <select id="theme" aria-label="Theme"><option value="">Any theme</option></select>
+  <div class="combo"><input id="loc" type="search" placeholder="Any location" autocomplete="off" aria-label="Location"><ul class="combo-list" id="loc-list" hidden></ul></div>
+  <div class="combo"><input id="theme" type="search" placeholder="Any theme" autocomplete="off" aria-label="Theme"><ul class="combo-list" id="theme-list" hidden></ul></div>
   <select id="prize" aria-label="Minimum prize">
     <option value="">Any prize</option><option value="0">Cash prize offered</option>
     <option value="1000">$1k+</option><option value="10000">$10k+</option>
@@ -85,27 +91,68 @@ let DATA = [], state = {q:"",loc:"",theme:"",prize:"",state:"",sort:"new"};
 const fmtPrize = n => n == null ? "" : "$" + n.toLocaleString("en-US");
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
 
-function options(sel, values){
-  const cur = sel.value;
-  values.sort().forEach(v => {
-    if (![...sel.options].some(o => o.value === v)) sel.add(new Option(v, v));
+function passes(h, f){
+  const {q,loc,theme,prize,state:st} = f;
+  if (q && !((h.title+" "+(h.organizer||"")+" "+h.themes.join(" ")).toLowerCase().includes(q))) return false;
+  if (loc && !((h.location||"").toLowerCase().includes(loc.toLowerCase()))) return false;
+  if (theme && !h.themes.some(t => t.toLowerCase().includes(theme.toLowerCase()))) return false;
+  if (prize !== "" && !(h.prize_amount != null && h.prize_amount >= +prize)) return false;
+  if (st && h.open_state !== st) return false;
+  return true;
+}
+function facetValues(h, kind){
+  return kind === "loc" ? (h.online ? [] : [h.location || ""]) : h.themes;
+}
+function syncHash(k, v){
+  history.replaceState(null, "", v ? "#" + k + "=" + encodeURIComponent(v) : location.pathname);
+}
+function combobox(id, kind, anyLabel){
+  const input = $(id), list = $(id + "-list");
+  function render(){
+    const other = {...state}; delete other[kind];
+    const counts = {};
+    DATA.filter(h => passes(h, other)).forEach(h =>
+      facetValues(h, kind).forEach(v => counts[v] = (counts[v] || 0) + 1));
+    const q = input.value.trim().toLowerCase(), sel = state[kind].trim().toLowerCase();
+    const items = Object.entries(counts).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]))
+      .filter(([v]) => !q || v.toLowerCase().includes(q)).slice(0,40);
+    list.innerHTML = `<li class="head" data-v="">${anyLabel}</li>` +
+      items.map(([v,c]) => `<li data-v="${esc(v)}" class="${v.toLowerCase()===sel?"sel":""}"><span>${esc(v)}</span><span class="cnt">${c}</span></li>`).join("") ||
+      `<li class="head">No matches</li>`;
+    list.hidden = false;
+  }
+  input.addEventListener("focus", render);
+  input.addEventListener("input", () => { state[kind] = input.value.trim(); apply(); syncHash(kind, state[kind]); render(); });
+  input.addEventListener("blur", () => setTimeout(() => list.hidden = true, 150));
+  list.addEventListener("mousedown", e => {
+    const li = e.target.closest("li"); if (!li) return;
+    e.preventDefault();
+    input.value = li.dataset.v; state[kind] = li.dataset.v;
+    apply(); syncHash(kind, state[kind]); list.hidden = true;
   });
-  sel.value = cur;
+}
+function updateCounts(){
+  const other = f => { const o = {...state}; delete o[f]; return o; };
+  $("prize").querySelectorAll("option").forEach(o => {
+    if (o.value === "") { o.textContent = "Any prize"; return; }
+    const n = DATA.filter(h => passes(h, other("prize")) && o.value === "0"
+      ? h.prize_amount != null : h.prize_amount >= +o.value).length;
+    const lbl = {"0":"Cash prize offered","1000":"$1k+","10000":"$10k+","50000":"$50k+","100000":"$100k+"}[o.value];
+    o.textContent = lbl + " (" + n + ")";
+  });
+  $("state").querySelectorAll("option").forEach(o => {
+    const lbl = {"":"All","upcoming":"Accepting registrations","ongoing":"Happening now"}[o.value];
+    o.textContent = o.value === "" ? lbl : lbl + " (" + DATA.filter(h => passes(h, other("state")) && h.open_state === o.value).length + ")";
+  });
 }
 function apply(){
-  const {q,loc,theme,prize,state:st,sort} = state;
-  let out = DATA.filter(h => {
-    if (q && !((h.title+" "+(h.organizer||"")+" "+h.themes.join(" ")).toLowerCase().includes(q))) return false;
-    if (loc && h.location !== loc) return false;
-    if (theme && !h.themes.includes(theme)) return false;
-    if (prize !== "" && !(h.prize_amount != null && h.prize_amount >= +prize)) return false;
-    if (st && h.open_state !== st) return false;
-    return true;
-  });
+  const out = DATA.filter(h => passes(h, state));
+  const {sort} = state;
   out.sort((a,b) => sort === "prize" ? (b.prize_amount||0)-(a.prize_amount||0)
        : sort === "pop" ? (b.registrations||0)-(a.registrations||0)
        : b.id - a.id);
   $("count").textContent = out.length + " of " + DATA.length + " hackathons";
+  if (DATA.length) updateCounts();
   $("empty").hidden = out.length > 0;
   $("list").innerHTML = out.map(h => `<li>
     ${h.thumbnail ? `<img class="thumb" src="${esc(h.thumbnail)}" alt="" loading="lazy">` : ""}
@@ -143,8 +190,8 @@ $("clear").addEventListener("click", () => {
   DATA = d.hackathons || [];
   $("updated").textContent = new Date(d.updated).toLocaleString();
   if (!DATA.length) return;
-  options($("loc"), [...new Set(DATA.filter(h=>!h.online).map(h=>h.location).filter(Boolean))]);
-  options($("theme"), [...new Set(DATA.flatMap(h=>h.themes))]);
+  combobox("loc", "loc", "Any location");
+  combobox("theme", "theme", "Any theme");
   // noscript fallback
   const ns = $("noscript-list");
   if (ns) ns.innerHTML = DATA.slice(0,20).map(h=>`<li><a href="${esc(h.url)}">${esc(h.title)}</a> — ${esc(h.dates||"")}</li>`).join("");
